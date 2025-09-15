@@ -1,0 +1,63 @@
+{
+  // See https://go.microsoft.com/fwlink/?LinkId=733558
+  // for the documentation about the tasks.json format
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run DocAI Vector Update Pipeline",
+      "type": "shell",
+      // This task is now hardcoded to run the specific 'update_vector_store_with_doc_ai.py' script.
+      // This is more robust than relying on the active file in the editor.
+      "command": "source ${workspaceFolder}/.scripts/configure.sh && ${workspaceFolder}/.venv/python3.12/bin/python ${workspaceFolder}/.scripts/run_as_pipeline.py ${workspaceFolder}/.scripts/update_vector_store_with_doc_ai.py",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Create Vector Search Index",
+      "type": "shell",
+      "command": "source ${workspaceFolder}/.scripts/configure.sh && ${workspaceFolder}/.venv/python3.12/bin/python ${workspaceFolder}/.scripts/create_vector_store_index.py",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    },
+    {
+      "label": "TEST: Run Hello World Job",
+      "type": "shell",
+      "command": "source ${workspaceFolder}/.scripts/configure.sh && ${workspaceFolder}/.venv/python3.12/bin/python ${workspaceFolder}/.scripts/run_as_pipeline.py ${workspaceFolder}/.scripts/hello_vertex.py",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    },
+    {
+      "label": "Generate Text Files for RAG Engine",
+      "type": "shell",
+      "command": "source ${workspaceFolder}/.scripts/configure.sh && ${workspaceFolder}/.venv/python3.12/bin/python ${workspaceFolder}/.scripts/update_vector_store_with_doc_ai.py --output-mode rag-engine-text-files",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    },
+    {
+      "label": "Create RAG Engine Corpus",
+      "type": "shell",
+      "command": "source ${workspaceFolder}/.scripts/configure.sh && ${workspaceFolder}/.venv/python3.12/bin/python ${workspaceFolder}/.scripts/create_vector_store_with_rag_engine.py",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    }
+  ]
+}
