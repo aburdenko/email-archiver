@@ -432,8 +432,10 @@ if command -v clasp &> /dev/null && clasp login --status &>/dev/null; then
     # 2. Inject the GCP Project ID
     sed -i "s|__GCP_PROJECT_ID_PLACEHOLDER__|${PROJECT_ID}|g" "$SIDEBAR_HTML_FILE"
 
+    GEMINI_API_KEY=""
+    
     # 3. Inject the default Gemini API Key by replacing the placeholder attribute with a value attribute.
-    sed -i 's|placeholder="Enter key here"|value="AIzaSyDqL3cmBgjP2EOt-OELvRcspc3_z3XAjYk"|g' "$SIDEBAR_HTML_FILE"
+    sed -i 's|placeholder="Enter key here"|value="${GEMINI_API_KEY}"|g' "$SIDEBAR_HTML_FILE"
 
     # 4. Inject the current datetime stamp in Eastern Time for version tracking.
     DATETIME_STAMP=$(TZ="America/New_York" date +"%Y-%m-%d %H:%M %Z")
