@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <!-- Use Google's CSS for a consistent look and feel -->
+    <link rel="stylesheet" href="https://ssl.gstatic.com/docs/script/css/add-ons1.css">
+    <style>
+      .branding-below {
+        bottom: 56px;
+        top: 0;
+      }
+      .logo {
+        font-weight: bold;
+        font-size: 16px;
+        margin-bottom: 10px;
+      }
+      #result {
+        margin-top: 15px;
+        word-wrap: break-word;
+      }
+      #error {
+        color: red;
+      }
+      .help-text {
+        font-size: 11px;
+        color: #666;
+        margin-top: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="sidebar branding-below">      
+      <div class="logo">Slide Deck Generator</div>
+
+      <form id="generator-form">
+        <input type="hidden" id="gcpProjectId" name="gcpProjectId" value="__GCP_PROJECT_ID_PLACEHOLDER__">
+
+        <div class="block">
+          <label for="geminiApiKey">Gemini API Key (from AI Studio)</label>
+          <input type="password" id="geminiApiKey" name="geminiApiKey" placeholder="Enter key here">
+          <p class="help-text">If provided, this will be used for the API call. Otherwise, standard project authentication will be used.</p>
+        </div>
+
+        <div class="block">
+          <label for="presentationTitle">Presentation Title</label>
+          <input type="text" id="presentationTitle" name="presentationTitle" value="New Generated Presentation">
+        </div>
+
+        <div class="block">
+          <label for="customerRequest">Customer Request (Prompt)</label>
+          <textarea id="customerRequest" name="customerRequest" rows="4"></textarea>
+        </div>
+
+        <div class="block form-group">
+          <label for="meetingDate">Meeting Date</label>
+          <input type="date" id="meetingDate" name="meetingDate">
+        </div>
+
+        <div class="block">
+          <label for="presentationDuration">Presentation Duration (minutes)</label>
+          <input type="number" id="presentationDuration" name="presentationDuration" value="30">
+        </div>
+
+        <div class="block">
+          <label for="sourceFolderId">Source Slides Folder Path</label>
+          <input type="text" id="sourceFolderId" name="sourceFolderId" placeholder="Paste folder ID here">
+        </div>
+
+        <div class="block">
+          <input type="checkbox" id="addSpeakerNotes" name="addSpeakerNotes" style="vertical-align: middle;">
+          <label for="addSpeakerNotes" style="vertical-align: middle;">Add AI-generated speaker notes</label>
+        </div>
+
+        <div class="block">
+          <button type="submit" class="action">Generate Slides</button>
+        </div>
+
+        <div style="position: absolute; top: 12px; right: 12px; font-size: 9px; color: #999;">
+          Updated: __DATETIME_PLACEHOLDER__
+        </div>
+      </form>
+      
+      <div id="result"></div>
+      <div id="error"></div>
+    </div>
+    
+
+    <script>
+      let pollingIntervalId = null;
+
+      document.addEventListener('DOMContentLoaded', function() {
+        document.getElementById('meetingDate').valueAsDate = new Date();
+        
+        google.script.run
+          .withSuccessHandler(props => { 
+            if (props.sourceFolderId) document.getElementById('sourceFolderId').value = props.sourceFolderId;
+          })
+          .getUserProperties();
+
+        document.getElementById('generator-form').addEventListener('submit', handleFormSubmit);
+
+        // Save the folder ID to user properties whenever it's changed.
+        document.getElementById('sourceFolderId').addEventListener('change', function(event) {
+          google.script.run.saveUserProperties({ sourceFolderId: event.target.value });
+        });
+      });
+
+      function stopPolling() {
+        if (pollingIntervalId) {
+          clearInterval(pollingIntervalId);
+          pollingIntervalId = null;
+        }
+      }
+
+      function handleFormSubmit(event) {
+        event.preventDefault();
+        setLoading(true);
+
+        const formObject = {
+          presentationTitle: document.getElementById('presentationTitle').value,
+          customerRequest: document.getElementById('customerRequest').value,
+          meetingDate: document.getElementById('meetingDate').value,
+          presentationDuration: document.getElementById('presentationDuration').value,
+          sourceFolderId: document.getElementById('sourceFolderId').value,
+          gcpProjectId: document.getElementById('gcpProjectId').value,
+          geminiApiKey: document.getElementById('geminiApiKey').value,
+          addSpeakerNotes: document.getElementById('addSpeakerNotes').checked
+        };
+        
+        const jobId = 'job_' + Date.now() + Math.random();
+
+        // Start polling for status updates
+        pollingIntervalId = setInterval(() => {
+          google.script.run
+            .withSuccessHandler(status => {
+              if (status && !status.startsWith('ERROR:')) {
+                const resultDiv = document.getElementById('result');
+                resultDiv.innerHTML = '<div class="spinner" style="display: inline-block; vertical-align: middle;"></div>' +
+                                      `<span style="vertical-align: middle; margin-left: 8px;">${status}</span>`;
+              }
+            })
+            .getGenerationStatus(jobId);
+        }, 2000); // Poll every 2 seconds
+
+        google.script.run
+          .withSuccessHandler(onGenerationSuccess)
+          .withFailureHandler(onGenerationFailure)
+          .startGeneration(formObject, jobId);
+      }
+
+      function setLoading(isLoading) {
+        document.querySelector('button[type="submit"]').disabled = isLoading;
+        const resultDiv = document.getElementById('result');
+        const errorDiv = document.getElementById('error');
+        resultDiv.innerHTML = '';
+        errorDiv.innerHTML = '';
+        if (isLoading) {
+          resultDiv.innerHTML = '<div class="spinner" style="display: inline-block; vertical-align: middle;"></div>' +
+                              '<span style="vertical-align: middle; margin-left: 8px;">Generating slides, please wait... This may take a few minutes.</span>';
+        }
+      }
+
+      // Success handler for when the entire synchronous generation is complete.
+      function onGenerationSuccess() {
+        stopPolling();
+        setLoading(false);
+        const resultDiv = document.getElementById('result');
+        resultDiv.innerHTML = `✅ Slides generated successfully!`;
+      }
+
+      function onGenerationFailure(error) {
+        stopPolling();
+        setLoading(false);
+        const errorDiv = document.getElementById('error');
+        errorDiv.innerHTML = `❌ Error: ${error.message}`;
+      }
+    </script>
+  </body>
+</html>

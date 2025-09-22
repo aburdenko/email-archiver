@@ -125,11 +125,6 @@ export DOCKER_REPO="us-central1-docker.pkg.dev/${PROJECT_ID}/pipelines-repo" # A
 export GCS_OUTPUT_URI="gs://${STAGING_GCS_BUCKET}/docai-output/" # Output for batch DocAI jobs
 export GCS_RAG_TEXT_URI="gs://${SOURCE_GCS_BUCKET}/rag-engine-source-texts/" # Output for pre-processed text files for RAG Engine
 
-
-echo "Ensuring pipeline resources exist..."
-gcloud storage buckets describe gs://$STAGING_GCS_BUCKET &>/dev/null || gcloud storage buckets create gs://$STAGING_GCS_BUCKET --project=$PROJECT_ID -l $REGION
-gcloud artifacts repositories describe pipelines-repo --location=us-central1 &>/dev/null || gcloud artifacts repositories create pipelines-repo --repository-format=docker --location=us-central1 --description="Docker repository for Vertex AI Pipelines"
-
 # --- Vector Store Configuration ---
 # IMPORTANT: Bucket names must be globally unique.
 # Using your project ID in the bucket name is a good practice.
@@ -192,6 +187,8 @@ if [ ! -d ".venv/python3.12" ]; then
 
   gcloud services enable documentai.googleapis.com -q
   gcloud services enable aiplatform.googleapis.com -q
+  # Enable the Google Picker API, which is required for the folder selection UI.
+  gcloud services enable picker.googleapis.com -q
 
   # Grant the Document AI Service Agent permissions for batch processing
   gcloud storage buckets add-iam-policy-binding gs://$SOURCE_GCS_BUCKET --member="serviceAccount:$DOCAI_SERVICE_AGENT" --role="roles/storage.objectViewer" # Read input
@@ -218,6 +215,13 @@ if [ ! -d ".venv/python3.12" ]; then
   echo "Granting the function's service account the Vertex AI User role..."
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:$FUNCTION_SERVICE_ACCOUNT" \
+    --role="roles/aiplatform.user"
+
+  echo "Granting the Apps Script user the Vertex AI User role for direct API calls..."
+  # The user running the Apps Script needs this role to call the Gemini API directly.
+  # The MEMBER variable was set above to either the user or the local SA.
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="$MEMBER" \
     --role="roles/aiplatform.user"
 
   # --- Ensure 'unzip' is installed for VSIX validation ---
@@ -292,18 +296,14 @@ else
     NEEDS_UPDATE=true
   # The 'login' command might not exist on very old versions. If it fails,
   # the grep will also fail, correctly triggering an update.
-  elif ! clasp login --help 2>/dev/null | grep -q -- '--no-localhost'; then
-    echo "WARNING: Installed 'clasp' is outdated or broken. It needs to support the '--no-localhost' flag."
+  elif ! clasp login --help 2>/dev/null | grep -q -- '--no-localhost' || ! clasp --help 2>/dev/null | grep -q 'delete'; then
+    echo "WARNING: Installed 'clasp' is outdated."
+    echo "It needs to support the '--no-localhost' flag for login and the 'delete' command."
     NEEDS_UPDATE=true
   else
     CLASP_VERSION=$(clasp --version)
     echo "Found clasp version: $CLASP_VERSION."
-    # Also check if the version is a pre-release (e.g., '3.0.6-alpha').
-    # A simple check for a hyphen is a good way to catch most pre-release tags.
-    if [[ "$CLASP_VERSION" == *"-"* ]]; then
-      echo "WARNING: Unstable pre-release clasp version ($CLASP_VERSION) found."
-      NEEDS_UPDATE=true
-    fi
+    # The check for the '--no-localhost' flag is sufficient to ensure a modern version. We no longer need to check for pre-release tags.
   fi
 
   # *** FIX 1: Made installer more robust: UNINSTALL first, then INSTALL @latest ***
@@ -417,10 +417,33 @@ mv "$TEMP_ENV_FILE" "$ENV_FILE"
 # This works even when using gcloud credentials (which don't create ~/.clasprc.json).
 if command -v clasp &> /dev/null && clasp login --status &>/dev/null; then
 
+  # --- Generate Sidebar.html from template ---
+  # This creates the final HTML file for Apps Script from a template,
+  # injecting project-specific details and default values.
+  # The final Sidebar.html is git-ignored to protect sensitive data.
+  SIDEBAR_TEMPLATE_FILE="apps-script/Sidebar.template.html"
+  SIDEBAR_HTML_FILE="apps-script/Sidebar.html"
+
+  if [ -f "$SIDEBAR_TEMPLATE_FILE" ]; then
+    echo "Generating $SIDEBAR_HTML_FILE from template..."
+    # 1. Copy the template to the final file
+    cp "$SIDEBAR_TEMPLATE_FILE" "$SIDEBAR_HTML_FILE"
+
+    # 2. Inject the GCP Project ID
+    sed -i "s|__GCP_PROJECT_ID_PLACEHOLDER__|${PROJECT_ID}|g" "$SIDEBAR_HTML_FILE"
+
+    # 3. Inject the default Gemini API Key by replacing the placeholder attribute with a value attribute.
+    sed -i 's|placeholder="Enter key here"|value="AIzaSyDqL3cmBgjP2EOt-OELvRcspc3_z3XAjYk"|g' "$SIDEBAR_HTML_FILE"
+
+    # 4. Inject the current datetime stamp in Eastern Time for version tracking.
+    DATETIME_STAMP=$(TZ="America/New_York" date +"%Y-%m-%d %H:%M %Z")
+    sed -i "s|__DATETIME_PLACEHOLDER__|${DATETIME_STAMP}|g" "$SIDEBAR_HTML_FILE"
+  fi
+
   # *** REMINDER: YOU MUST EDIT THIS VALUE ***
   # Get this ID from your Apps Script project's "Project Settings" page.
   APP_SCRIPT_ID="1GFB9Skd187aZX1XRI1yLcJ8aCWGb2eCj57C5As1lhfzpnR_3fr5oearE"
-
+  
   # Add a check to ensure the user has replaced the placeholder ID.
   if [[ "$APP_SCRIPT_ID" == "!!!-REPLACE-ME-WITH-YOUR-SCRIPT-ID-FROM-PROJECT-SETTINGS-!!!" ]]; then
     echo "-------------------------------------------------------------------" >&2
@@ -438,6 +461,15 @@ if command -v clasp &> /dev/null && clasp login --status &>/dev/null; then
     # This means your Apps Script code will live in a subfolder named "apps-script".
     echo "{\"scriptId\":\"$APP_SCRIPT_ID\", \"rootDir\": \"apps-script\"}" > .clasp.json
     mkdir -p apps-script # Create the directory for your code
+
+    echo "Performing one-time bootstrap to sync with the remote Apps Script project..."
+    # This is a common issue: `clasp push` fails on a pre-existing project.
+    # This sequence forces clasp to learn the remote file IDs without losing local changes.
+    # 1. `pull --force` overwrites local files but syncs clasp's internal state.
+    clasp pull --force
+    # 2. `git checkout` immediately restores our local files, which are the source of truth.
+    git checkout -- apps-script/
+    echo "Bootstrap complete. You can now push changes."
   fi
   
   echo "Apps Script project linked successfully. You can now run 'clasp pull'."

@@ -14,6 +14,12 @@
     },
     "terminal.integrated.defaultProfile.linux": "Project Bash",
     // --- Recommended Python Settings ---
+    // --- File Associations ---
+    // Treat Google Apps Script .gs files as JavaScript for syntax highlighting.
+    "files.associations": {
+        "*.gs": "javascript"
+    },
+
     // Point to the project's virtual environment interpreter.
     "python.defaultInterpreterPath": "${workspaceFolder}/.venv/python3.12/bin/python",
     // We handle venv activation in our terminal_init.sh, so we disable the default activator
