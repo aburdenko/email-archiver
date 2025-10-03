@@ -434,8 +434,8 @@ if command -v clasp &> /dev/null && clasp login --status &>/dev/null; then
 
     GEMINI_API_KEY=""
     
-    # 3. Inject the default Gemini API Key by replacing the placeholder attribute with a value attribute.
-    sed -i 's|placeholder="Enter key here"|value="${GEMINI_API_KEY}"|g' "$SIDEBAR_HTML_FILE"
+    # 3. Inject the default Gemini API Key by replacing the placeholder in the 'value' attribute.
+    sed -i "s|__GEMINI_API_KEY_PLACEHOLDER__|${GEMINI_API_KEY}|g" "$SIDEBAR_HTML_FILE"
 
     # 4. Inject the current datetime stamp in Eastern Time for version tracking.
     DATETIME_STAMP=$(TZ="America/New_York" date +"%Y-%m-%d %H:%M %Z")

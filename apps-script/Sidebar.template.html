@@ -37,8 +37,14 @@
 
         <div class="block">
           <label for="geminiApiKey">Gemini API Key (from AI Studio)</label>
-          <input type="password" id="geminiApiKey" name="geminiApiKey" placeholder="Enter key here">
+          <input type="password" id="geminiApiKey" name="geminiApiKey" value="__GEMINI_API_KEY_PLACEHOLDER__" placeholder="Enter key here">
           <p class="help-text">If provided, this will be used for the API call. Otherwise, standard project authentication will be used.</p>
+        </div>
+
+        <div class="block">
+          <label for="model_id">Gemini Model ID (from AI Studio)</label>
+          <input type="text" id="geminiModelId" name="geminiModelId" value="gemini-2.5-flash" placeholder="gemini-2.5-flash">
+          <p class="help-text">If provided, this will be used for the API call.</p>
         </div>
 
         <div class="block">
@@ -124,6 +130,7 @@
           sourceFolderId: document.getElementById('sourceFolderId').value,
           gcpProjectId: document.getElementById('gcpProjectId').value,
           geminiApiKey: document.getElementById('geminiApiKey').value,
+          geminiModelId: document.getElementById('geminiModelId').value,
           addSpeakerNotes: document.getElementById('addSpeakerNotes').checked
         };
         

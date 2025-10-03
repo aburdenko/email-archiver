@@ -45,7 +45,7 @@ function extractTextFromSlide(slide) {
  * @param {string} [authDetails.gcpProjectId] The Google Cloud Project ID for OAuth.
  * @returns {string} The text content from the model's response.
  */
-function callGemini(prompt, authDetails) {
+function callGemini(prompt, authDetails, modelId) {
   let model;
   let url;
   let options;
@@ -55,17 +55,24 @@ function callGemini(prompt, authDetails) {
       "parts": [{ "text": prompt }]
     }],
     "generationConfig": {
-      "response_mime_type": "application/json",
       "temperature": 0.2,
     }
   };
 
+  let modelName;
+  // Strictly use the modelId from the form field.
+  if (modelId && modelId.trim() !== '') {
+    modelName = modelId.trim();
+  } else {
+    // If the form field is empty, throw an error as per the user's request ("ONLY from the form field").
+    throw new Error("Gemini Model ID must be provided in the form field. It cannot be empty.");
+  }
+
   // Prioritize API Key if provided. This is now the default method if a key is present.
   if (authDetails.geminiApiKey) {
-    Logger.log("Using Gemini API Key for authentication.");
+    Logger.log(`Using Gemini API Key for authentication with model: ${modelName}`);
     // The Generative Language API (for API keys) uses a different model identifier.
-    model = "gemini-1.5-flash-latest";
-    url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    url = `https://generativelanguage.googleapis.com/v1/models/${modelName}:generateContent`;
 
     options = {
       'method': 'post',
@@ -80,11 +87,11 @@ function callGemini(prompt, authDetails) {
   } 
   // Fallback to Project-based OAuth if no API key is provided
   else if (authDetails.gcpProjectId && !authDetails.gcpProjectId.includes('__GCP_PROJECT_ID_PLACEHOLDER__')) {
-    Logger.log("Using Project-based OAuth for authentication.");
+    Logger.log(`Using Project-based OAuth for authentication with model: ${modelName}`);
+    
     // The Vertex AI API uses a more specific model identifier.
-    model = "gemini-1.5-pro-preview-0409";
     const region = "us-central1";
-    url = `https://${region}-aiplatform.googleapis.com/v1/projects/${authDetails.gcpProjectId}/locations/${region}/publishers/google/models/${model}:generateContent`;
+    url = `https://${region}-aiplatform.googleapis.com/v1/projects/${authDetails.gcpProjectId}/locations/${region}/publishers/google/models/${modelName}:generateContent`;
 
     options = {
       'method': 'post',
@@ -106,12 +113,16 @@ function callGemini(prompt, authDetails) {
   const responseCode = response.getResponseCode();
   const responseBody = response.getContentText();
 
+  // Preprocess responseBody to remove markdown code block fences if present
+  // This handles cases where the model wraps JSON in ```json ... ```
+  let cleanedResponseBody = responseBody.replace(/```json\s*|\s*```/g, '').trim();
+
   if (responseCode !== 200) {
     Logger.log(`Gemini API Error: ${responseCode} - ${responseBody}`);
-    throw new Error(`Gemini API request failed with status ${responseCode}. Check Logs for details.`);
+    throw new Error(`Gemini API request failed with status ${responseCode}: ${responseBody}`);
   }
 
-  const result = JSON.parse(responseBody);
+  const result = JSON.parse(cleanedResponseBody);
   // The response structure is consistent enough between the two APIs for this to work.
   if (result.candidates && result.candidates.length > 0 && result.candidates[0].content && result.candidates[0].content.parts && result.candidates[0].content.parts.length > 0) {
     const content = result.candidates[0].content.parts[0].text;
@@ -213,6 +224,9 @@ function updateJobStatus(jobId, message) {
   }
 }
 
+
+
+
 /**
  * Helper function to find a Shape by its text content and update it.
  * This is used to target the custom-labeled fields on the title slide.
@@ -239,6 +253,33 @@ function updateTextByInitialValue(slide, initialValue, newValue) {
 }
 
 /**
+ * Finds the largest text shapes on a slide, assuming they are the title and subtitle.
+ * @param {GoogleAppsScript.Slides.Slide} slide The slide to search.
+ * @returns {{titleShape: GoogleAppsScript.Slides.Shape | null, subtitleShape: GoogleAppsScript.Slides.Shape | null}}
+ */
+function findLargestTextShapes(slide) {
+  const shapes = slide.getShapes()
+    .filter(shape => shape.getText && shape.getText().asString().trim() !== '')
+    .sort((a, b) => {
+      // Sort by font size primarily, then by shape area as a tie-breaker.
+      const fontA = a.getText().getTextStyle().getFontSize() || 0;
+      const fontB = b.getText().getTextStyle().getFontSize() || 0;
+      if (fontA !== fontB) {
+        return fontB - fontA;
+      }
+      const areaA = a.getWidth() * a.getHeight();
+      const areaB = b.getWidth() * b.getHeight();
+      return areaB - areaA;
+    });
+
+  return {
+    titleShape: shapes.length > 0 ? shapes[0] : null,
+    subtitleShape: shapes.length > 1 ? shapes[1] : null,
+  };
+}
+
+
+/**
  * The main function to process the user's request, call Gemini, and generate the slide deck.
  * This function is called synchronously from the sidebar. It performs all operations
  * and waits for them to complete before returning.
@@ -246,13 +287,19 @@ function updateTextByInitialValue(slide, initialValue, newValue) {
  * @param {Object} formObject The data from the sidebar form.
  * @param {string} jobId A unique identifier for this generation job for status tracking.
  */
+
 function startGeneration(formObject, jobId) {
+  // Destructure geminiModelId from formObject
   const activeDeck = SlidesApp.getActivePresentation();
+  let originalTitleSlide = null;
   Logger.log(`Synchronous generation started with formObject: ${JSON.stringify(formObject)} and jobId: ${jobId}`);
   updateJobStatus(jobId, 'Starting generation...');
 
   // --- Step 0: Clean up presentation, keeping only the first slide as a template for the title. ---
   const allSlidesInitial = activeDeck.getSlides();
+  if (allSlidesInitial.length > 0) {
+    originalTitleSlide = allSlidesInitial[0]; // Capture the original slide for layout/theme later
+  }
   if (allSlidesInitial.length > 1) {
     Logger.log(`Presentation has ${allSlidesInitial.length} slides. Removing all but the first.`);
     for (let i = allSlidesInitial.length - 1; i > 0; i--) {
@@ -262,7 +309,7 @@ function startGeneration(formObject, jobId) {
 
   try {
     const logOutput = [];
-    let { presentationTitle, customerRequest, presentationDuration, sourceFolderId, gcpProjectId, geminiApiKey, addSpeakerNotes, meetingDate } = formObject;
+    let { presentationTitle, customerRequest, presentationDuration, sourceFolderId, gcpProjectId, geminiApiKey, geminiModelId, addSpeakerNotes, meetingDate } = formObject;
 
     if (!sourceFolderId) {
       throw new Error("Source Slides Folder ID is not set. Please paste the folder ID or URL.");
@@ -275,50 +322,65 @@ function startGeneration(formObject, jobId) {
     activeDeck.setName(presentationTitle || 'Generated Presentation');
     logOutput.push(`Renamed active presentation to: ${activeDeck.getName()}`);
 
-    // --- Update Title Slide (if it exists) ---
-    const slides = activeDeck.getSlides();
-    if (slides.length > 0) {
-      try {
-        const titleSlide = slides[0];
-        let updatedCount = 0;
-
-        // Try to update standard placeholders first, as they are more reliable.
-        const titlePlaceholder = titleSlide.getPlaceholder(SlidesApp.PlaceholderType.TITLE) || titleSlide.getPlaceholder(SlidesApp.PlaceholderType.CENTERED_TITLE);
-        if (titlePlaceholder) {
-          titlePlaceholder.getText().setText(presentationTitle);
-          updatedCount++;
-        } else {
-          // Fallback to custom-labeled field if no standard title placeholder is found.
-          if (updateTextByInitialValue(titleSlide, 'TITLE', presentationTitle)) {
-            updatedCount++;
-          }
-        }
-
-        const subtitlePlaceholder = titleSlide.getPlaceholder(SlidesApp.PlaceholderType.SUBTITLE);
-        if (subtitlePlaceholder) {
-          // Use subtitle for the customer request if available.
-          subtitlePlaceholder.getText().setText(customerRequest);
-          updatedCount++;
-        } else {
-          // Fallback to custom-labeled field.
-          if (updateTextByInitialValue(titleSlide, 'Description', customerRequest)) {
-            updatedCount++;
-          }
-        }
-        
-        // Format the date for the "Date" field. This is likely a custom field.
-        // The `replace` call prevents timezone issues where new Date('YYYY-MM-DD') is parsed as UTC.
-        const formattedDate = meetingDate ? new Date(meetingDate.replace(/-/g, '\/')).toLocaleDateString() : new Date().toLocaleDateString();
-        if (updateTextByInitialValue(titleSlide, 'Date', formattedDate)) {
-          updatedCount++;
-        }
-
-        logOutput.push(`Updated ${updatedCount} field(s) on the title slide.`);
-      } catch (e) {
-        logOutput.push(`Warning: An error occurred while trying to update the title slide. Error: ${e.message}`);
+    // --- Create and Update Title Slide ---
+    let newTitleSlide = null;
+    try {
+      // Use the layout from the original first slide, or a default if none exists.
+      const titleLayout = originalTitleSlide ? originalTitleSlide.getLayout() : SlidesApp.PredefinedLayout.TITLE_SLIDE;
+      
+      // If a slide already exists at index 0, we update it instead of inserting a new one.
+      if (activeDeck.getSlides().length > 0) {
+        newTitleSlide = activeDeck.getSlides()[0];
+      } else {
+        newTitleSlide = activeDeck.insertSlide(0, titleLayout);
       }
-    } else {
-      logOutput.push('Warning: Presentation has no slides. Skipping title slide update.');
+      
+      let updatedCount = 0;
+
+      // Try to update standard placeholders first, as they are more reliable.
+      const titlePlaceholder = newTitleSlide.getPlaceholder(SlidesApp.PlaceholderType.TITLE) || newTitleSlide.getPlaceholder(SlidesApp.PlaceholderType.CENTERED_TITLE);
+      if (titlePlaceholder) {
+        titlePlaceholder.getText().setText(presentationTitle);
+      } else if (!updateTextByInitialValue(newTitleSlide, '{{Title}}', presentationTitle)) {
+        // As a final fallback, find the largest text shape and assume it's the title.
+        const { titleShape } = findLargestTextShapes(newTitleSlide);
+        if (titleShape) {
+          titleShape.getText().setText(presentationTitle);
+          logOutput.push('Used largest text box as title fallback.');
+        }
+      }
+      // We count an update if the title is no longer the default.
+      if (newTitleSlide.getShapes().some(s => s.getText && s.getText().asString().includes(presentationTitle))) {
+         updatedCount++;
+      }
+
+      const subtitlePlaceholder = newTitleSlide.getPlaceholder(SlidesApp.PlaceholderType.SUBTITLE);
+      if (subtitlePlaceholder) {
+        // Use subtitle for the customer request if available.
+        subtitlePlaceholder.getText().setText(customerRequest);
+      } else if (!updateTextByInitialValue(newTitleSlide, '{{Descripition}}', customerRequest) && !updateTextByInitialValue(newTitleSlide, '{{Description}}', customerRequest)) {
+        // Final fallback for subtitle.
+        const { subtitleShape } = findLargestTextShapes(newTitleSlide);
+        if (subtitleShape) {
+          subtitleShape.getText().setText(customerRequest);
+          logOutput.push('Used second-largest text box as subtitle fallback.');
+        }
+      }
+      // We count an update if the subtitle is no longer the default.
+      if (newTitleSlide.getShapes().some(s => s.getText && s.getText().asString().includes(customerRequest))) {
+         updatedCount++;
+      }
+      
+      // Format the date for the "Date" field.
+      // The `replace` call prevents timezone issues where new Date('YYYY-MM-DD') is parsed as UTC.
+      const formattedDate = meetingDate ? new Date(meetingDate.replace(/-/g, '\/')).toLocaleDateString() : new Date().toLocaleDateString();
+      if (updateTextByInitialValue(newTitleSlide, '{{Date}}', formattedDate)) {
+        updatedCount++;
+      }
+
+      logOutput.push(`Updated ${updatedCount} field(s) on the title slide.`);
+    } catch (e) {
+      logOutput.push(`Warning: An error occurred while trying to update the title slide. Error: ${e.message}`);
     }
 
     // --- Step 2: Sanitize Input and Get Folder ---
@@ -417,11 +479,11 @@ function startGeneration(formObject, jobId) {
       }
     `;
 
-    // --- Step 5: Call Gemini and parse the response ---
-    const geminiResponse = callGemini(prompt, { gcpProjectId: gcpProjectId, geminiApiKey: geminiApiKey });
+    // --- Step 5: Call Gemini and process the response ---
+    const geminiResponse = callGemini(prompt, { gcpProjectId: gcpProjectId, geminiApiKey: geminiApiKey }, geminiModelId);
     const result = JSON.parse(geminiResponse);
-    const { slidesToCopy } = result;
-    updateJobStatus(jobId, 'AI analysis complete. Generating agenda...');
+    let { slidesToCopy } = result;
+    updateJobStatus(jobId, 'AI analysis complete. Filtering known incompatible slides...');
 
     if (!slidesToCopy || slidesToCopy.length === 0) {
       throw new Error("Gemini did not return any slides to copy. The prompt might not have matched any content, or the model's response was invalid.");
@@ -429,30 +491,29 @@ function startGeneration(formObject, jobId) {
 
     // --- Generate and Insert Agenda Slide ---
     updateJobStatus(jobId, 'Generating agenda slide...');
+    let agendaSlideInsertionIndex = 1; // Start inserting after the title slide (index 0)
     try {
       const agendaPrompt = `Based on the following user request, generate a concise agenda for a presentation.
 User Request: "${customerRequest}"
 Your response MUST be a valid JSON object with a "title" (e.g., "Agenda") and a "points" (an array of strings for the bullet points).
 Example: {"title": "Agenda", "points": ["Introduction", "Problem Statement", "Proposed Solution", "Next Steps"]}`;
 
-      const agendaResponse = callGemini(agendaPrompt, { gcpProjectId: gcpProjectId, geminiApiKey: geminiApiKey });
+      const agendaResponse = callGemini(agendaPrompt, { gcpProjectId: gcpProjectId, geminiApiKey: geminiApiKey }, geminiModelId);
       const agendaData = JSON.parse(agendaResponse);
 
       if (agendaData && agendaData.title && agendaData.points) {
         let agendaSlide;
         try {
           // Try to use the standard Title and Body layout first.
-          agendaSlide = activeDeck.insertSlide(1, SlidesApp.PredefinedLayout.TITLE_AND_BODY);
+          agendaSlide = activeDeck.insertSlide(agendaSlideInsertionIndex, SlidesApp.PredefinedLayout.TITLE_AND_BODY);
         } catch (e) {
-          // If it fails, the master is likely custom. Fall back to the layout of the first slide.
+          // If it fails, the master is likely custom. Fall back to the layout of the title slide.
           logOutput.push('Warning: Predefined layout "TITLE_AND_BODY" not found. Attempting fallback for agenda.');
-          let fallbackLayout;
-          if (activeDeck.getSlides().length > 0) {
-            fallbackLayout = activeDeck.getSlides()[0].getLayout();
-          } else {
-            fallbackLayout = SlidesApp.PredefinedLayout.BLANK;
+          let fallbackLayout = SlidesApp.PredefinedLayout.BLANK;
+          if (newTitleSlide) {
+            fallbackLayout = newTitleSlide.getLayout();
           }
-          agendaSlide = activeDeck.insertSlide(1, fallbackLayout);
+          agendaSlide = activeDeck.insertSlide(agendaSlideInsertionIndex, fallbackLayout);
         }
 
         // Now, try to populate the slide, checking for placeholders.
@@ -463,6 +524,7 @@ Example: {"title": "Agenda", "points": ["Introduction", "Problem Statement", "Pr
         if (bodyPlaceholder) {
           agendaData.points.forEach(point => bodyPlaceholder.getText().appendListItem(point));
         }
+        agendaSlideInsertionIndex++; // Increment index for content slides
         logOutput.push('Generated and inserted agenda slide.');
       } else {
         logOutput.push('Warning: Could not generate a valid agenda from the model\'s response.');
@@ -470,164 +532,246 @@ Example: {"title": "Agenda", "points": ["Introduction", "Problem Statement", "Pr
     } catch (e) {
       logOutput.push(`Warning: Failed to generate agenda slide. Error: ${e.message}`);
     }
-
     
     // --- Add Content Slides ---
-    updateJobStatus(jobId, 'Copying content slides...');
-    logOutput.push('Copying selected slides...');
-    slidesToCopy.forEach(slideInfo => {
+    updateJobStatus(jobId, 'Copying content elements to new slides...');
+    logOutput.push('Copying selected slide elements...');
+    for (const slideInfo of slidesToCopy) {
       let logMsg = '';
-      let newSlide;
+      let newSlide = null; // This will hold the newly created slide
+
       try {
         const sourceDeck = SlidesApp.openById(slideInfo.presentationId);
         const slideToCopy = sourceDeck.getSlideById(slideInfo.slideId);
-        
+
         if (slideToCopy) {
-          
+          // API QUIRK WORKAROUND: The object returned by appendSlide() is incomplete.
+          // To get a fully functional Slide object, we must get its ID from the
+          // incomplete object and then fetch it again from the presentation.
+
           try {
-            // Attempt 1: Try to copy the slide with its linked master/theme first.
-            newSlide = activeDeck.appendSlide(slideToCopy, SlidesApp.SlideLinkingMode.LINKED);
-            logMsg = `  - Copied slide from '${sourceDeck.getName()}' (LINKED)`;
-          } catch (copyErrorLinked) {
-            // Attempt 2: Fallback to NOT_LINKED if the LINKED attempt fails.
-            Logger.log(`Linked copy failed: ${copyErrorLinked.message}. Trying NOT_LINKED.`);
-            try {
-              newSlide = activeDeck.appendSlide(slideToCopy, SlidesApp.SlideLinkingMode.NOT_LINKED);
-              logMsg = `  - Copied slide from '${sourceDeck.getName()}' (NOT_LINKED fallback)`;
-            } catch (copyErrorUnlinked) {
-              // FINAL FALLBACK: If NOT_LINKED also fails, insert a placeholder error slide.
-              logMsg = `  - ERROR: Slide copy failed due to layout/theme mismatch. Inserting a placeholder. Error: ${copyErrorUnlinked.message}`;
-              try {
-                const errorPlaceholderSlide = activeDeck.appendSlide(SlidesApp.PredefinedLayout.BLANK);
-                const titleShape = errorPlaceholderSlide.insertShape(SlidesApp.ShapeType.TEXT_BOX, 50, 50, 622, 50); // Dimensions for a standard slide
-                titleShape.getText().setText('Slide Failed to Copy');
-                const bodyShape = errorPlaceholderSlide.insertShape(SlidesApp.ShapeType.TEXT_BOX, 50, 110, 622, 200);
-                bodyShape.getText().setText(`A slide could not be copied from the source presentation due to an incompatible layout.\n\nSource: '${sourceDeck.getName()}'\nSlide URL (approximate): ${sourceDeck.getUrl()}`);
-                titleShape.getText().getTextStyle().setBold(true).setFontSize(24);
-              } catch (placeholderError) {
-                logMsg += `\n    - CRITICAL: Failed to even insert a blank placeholder slide. Error: ${placeholderError.message}`;
-              }
-              Logger.log(logMsg);
-              logOutput.push(logMsg);
-              return; // Continue to the next slide in the list
-            }
+            // Attempt to copy the slide using NOT_LINKED mode, which is more robust against theme/layout mismatches.
+            const appendedSlide = activeDeck.appendSlide(slideToCopy, SlidesApp.SlideLinkingMode.NOT_LINKED);
+            // Now, get the fully-hydrated slide object using its ID. This is the most reliable method.
+            newSlide = activeDeck.getSlideById(appendedSlide.getObjectId());
+
+            logMsg = `  - Copied slide from '${sourceDeck.getName()}' (NOT_LINKED)`;
+          } catch (copyError) {
+            logMsg = `  - SKIPPED SLIDE: Copy failed due to layout incompatibility. Error: ${copyError.message}`;
+            logOutput.push(logMsg);
+            Logger.log(`CRITICAL: Failed to copy slide ${slideInfo.slideId} from ${sourceDeck.getName()}. Error: ${copyError.message}`);
+            continue; // Skip to the next slide in the loop
           }
-          
-          // --- Add Speaker Notes (if requested) ---
-          if (addSpeakerNotes) {
-            const speakerNotesShape = newSlide.getSpeakerNotesShape();
-            if (!speakerNotesShape) {
-              logMsg += '\n    - WARNING: Cannot add speaker notes; slide layout has no speaker notes placeholder.';
-            } else {
-              // First, get the source reference information.
-              const sourceDeckName = sourceDeck.getName();
-              const sourceUrl = sourceDeck.getUrl();
-              const slideIndex = sourceDeck.getSlides().findIndex(s => s.getObjectId() === slideInfo.slideId);
-              const slideNumber = slideIndex !== -1 ? slideIndex + 1 : 'N/A';
-              const sourceReference = `\n\n---\nSource: '${sourceDeckName}' (Slide ${slideNumber})\n${sourceUrl}`;
-
-              // Start with the notes from the copied slide.
-              let notesContent = speakerNotesShape.getText().asString().trim();
-
-              // If the slide has no notes, try to generate them.
-              if (!notesContent) {
-                try {
-                  const slideText = extractTextFromSlide(newSlide);
-                  if (slideText) {
-                    const speakerNotesPrompt = `You are a presentation coach. Based on the following slide content, generate concise and helpful speaker notes. Your response MUST be a valid JSON object with a single key "notes" containing the speaker notes as a string. Do not include the slide content itself in your response. Slide Content:\n\n${slideText}`;
-                    const speakerNotesResponse = callGemini(speakerNotesPrompt, { gcpProjectId: gcpProjectId, geminiApiKey: geminiApiKey });
-                    const speakerNotesData = JSON.parse(speakerNotesResponse);
-                    
-                    if (speakerNotesData && speakerNotesData.notes) {
-                      notesContent = speakerNotesData.notes; // Use the generated notes.
-                      logMsg += '\n    - Added AI-generated speaker notes.';
-                    } else {
-                      logMsg += '\n    - WARNING: Received empty speaker notes from model.';
-                    }
-                  } else {
-                    logMsg += '\n    - Skipped AI speaker notes generation (no text on slide).';
-                  }
-                } catch (e) {
-                  logMsg += `\n    - WARNING: Failed to generate speaker notes. Error: ${e.message}`;
-                }
-              } else {
-                logMsg += '\n    - Kept existing speaker notes.';
-              }
-
-              // Combine the notes (either existing or generated) with the source reference.
-              const finalNotes = notesContent ? notesContent + sourceReference : sourceReference.trim();
-              speakerNotesShape.getText().setText(finalNotes);              
-              logMsg += '\n    - Appended source link to speaker notes.';
-            }
-          }
-
         } else {
-          logMsg = `  - WARNING: Slide ${slideInfo.slideId} not found in presentation ${slideInfo.presentationId}.`;
+          logMsg = `  - WARNING: Slide ${slideInfo.slideId} not found in presentation ${slideInfo.presentationId}. Skipping.`;
+          logOutput.push(logMsg);
+          Logger.log(logMsg);
+          continue;
         }
       } catch (e) {
-        logMsg = `  - CRITICAL ERROR: Could not process slide from ID '${slideInfo.slideId}'. Skipping. Final Error: ${e.message}`;
+        // This catches errors from openById, getSlideById, etc.
+        logMsg = `  - CRITICAL ERROR: Could not access file/slide for ID '${slideInfo.slideId}'. Skipping. Final Error: ${e.message}`;
         logOutput.push(logMsg);
-        return; // Skip to next slide on critical error
+        Logger.log(logMsg);
+        continue; // Skip to next slide on critical error
+      }
+
+      // --- Add Speaker Notes (if requested) ---
+      if (newSlide && addSpeakerNotes) {
+        // API QUIRK: The slide object returned by appendSlide() doesn't have all methods.
+        // To work around this and the `getSpeakerNotesShape is not a function` error, we will
+        // access the speaker notes via the slide's master, which is a more reliable method.
+        const speakerNotesMaster = newSlide.getSpeakerNotesMaster();
+        const speakerNotesShape = speakerNotesMaster ? speakerNotesMaster.getPlaceholder(SlidesApp.PlaceholderType.BODY) : null;
+        
+        if (speakerNotesShape) {
+          const speakerNotesText = speakerNotesShape.getText();
+          // Re-open source deck for metadata in speaker notes
+          const sourceDeck = SlidesApp.openById(slideInfo.presentationId); 
+          const sourceDeckName = sourceDeck.getName();
+          const sourceUrl = sourceDeck.getUrl();
+          const slideIndex = newSlide.getSlideIndex();
+          const sourceSlideNumber = sourceDeck.getSlides().findIndex(s => s.getObjectId() === slideInfo.slideId) + 1;
+          const sourceReference = `\n\n---\nSource: '${sourceDeckName}' (Original slide ${sourceSlideNumber})\n${sourceUrl}`;
+
+          // Start with the notes from the original source slide.
+          const sourceSlide = SlidesApp.openById(slideInfo.presentationId).getSlideById(slideInfo.slideId);
+          let notesContent = sourceSlide.getSpeakerNotesShape()?.getText()?.asString()?.trim() || '';
+
+          // If the slide has no notes, try to generate them.
+          if (!notesContent) {
+            try {
+              const slideText = extractTextFromSlide(newSlide); // Use the original newSlide object here
+              if (slideText && slideText.trim() !== '') {
+                const speakerNotesPrompt = `You are a presentation coach. Based on the following slide content, generate concise and helpful speaker notes. Your response MUST be a valid JSON object with a single key "notes" containing the speaker notes as a string. Do not include the slide content itself in your response. Slide Content:\n\n${slideText}`;
+                const speakerNotesResponse = callGemini(speakerNotesPrompt, { gcpProjectId: formObject.gcpProjectId, geminiApiKey: formObject.geminiApiKey }, formObject.geminiModelId);
+                const speakerNotesData = JSON.parse(speakerNotesResponse);
+                
+                if (speakerNotesData && speakerNotesData.notes) {
+                  notesContent = speakerNotesData.notes;
+                  logMsg += '\n    - Added AI-generated speaker notes.';
+                } else {
+                  logMsg += '\n    - WARNING: Received empty speaker notes from model.';
+                }
+              } else {
+                logMsg += '\n    - Skipped AI speaker notes generation (no text on slide).';
+              }
+            } catch (e) {
+              logMsg += `\n    - WARNING: Failed to generate speaker notes. Error: ${e.message}`;
+            }
+          } else {
+            logMsg += '\n    - Kept existing speaker notes.';
+          }
+
+          // Combine the notes (either existing or generated) with the source reference.
+          const finalNotes = notesContent ? notesContent + sourceReference : sourceReference.trim();
+          speakerNotesText.setText(finalNotes);
+          logMsg += '\n    - Appended source link to speaker notes.';
+        } else {
+           // Case where getSpeakerNotesShape() returns null (the corrected flow)
+           logMsg += '\n    - WARNING: Cannot add speaker notes; copied slide layout has no speaker notes placeholder.';
+        }
       }
       Logger.log(logMsg);
       logOutput.push(logMsg);
-    });
+    }
 
+    // --- Generate and Insert "Next Steps" Slide ---
+    updateJobStatus(jobId, 'Generating "Next Steps" slide...');
+    try {
+      // Get the titles of the slides that were actually copied to give context to the model.
+      const copiedSlideTitles = activeDeck.getSlides()
+        .map(slide => {
+          const titlePlaceholder = slide.getPlaceholder(SlidesApp.PlaceholderType.TITLE) || slide.getPlaceholder(SlidesApp.PlaceholderType.CENTERED_TITLE);
+          return titlePlaceholder ? titlePlaceholder.getText().asString().trim() : null;
+        })
+        .filter(title => title); // Filter out nulls and empty strings
+
+      const nextStepsPrompt = `Based on the following user request and the titles of the slides presented, generate a concise "Next Steps" or "Call to Action" slide.
+User Request: "${customerRequest}"
+Presented Slide Titles: ${JSON.stringify(copiedSlideTitles)}
+Your response MUST be a valid JSON object with a "title" (e.g., "Next Steps") and a "points" (an array of strings for the bullet points).
+Example: {"title": "Next Steps", "points": ["Schedule follow-up meeting", "Provide detailed quote", "Begin pilot program"]}`;
+
+      const nextStepsResponse = callGemini(nextStepsPrompt, { gcpProjectId: gcpProjectId, geminiApiKey: geminiApiKey }, geminiModelId);
+      const nextStepsData = JSON.parse(nextStepsResponse);
+
+      if (nextStepsData && nextStepsData.title && nextStepsData.points) {
+        let nextStepsSlide;
+        try {
+          // Use the same robust layout-finding logic as the agenda slide.
+          nextStepsSlide = activeDeck.appendSlide(SlidesApp.PredefinedLayout.TITLE_AND_BODY);
+        } catch (e) {
+          logOutput.push('Warning: Predefined layout "TITLE_AND_BODY" not found. Attempting fallback for Next Steps slide.');
+          const fallbackLayout = activeDeck.getMasters()[0]?.getLayouts()[0] || SlidesApp.PredefinedLayout.BLANK;
+          nextStepsSlide = activeDeck.appendSlide(fallbackLayout);
+        }
+
+        const titlePlaceholder = nextStepsSlide.getPlaceholder(SlidesApp.PlaceholderType.TITLE);
+        if (titlePlaceholder) titlePlaceholder.getText().setText(nextStepsData.title);
+
+        const bodyPlaceholder = nextStepsSlide.getPlaceholder(SlidesApp.PlaceholderType.BODY);
+        if (bodyPlaceholder) nextStepsData.points.forEach(point => bodyPlaceholder.getText().appendListItem(point));
+        logOutput.push('Generated and inserted Next Steps slide.');
+      }
+    } catch (e) {
+      logOutput.push(`Warning: Failed to generate Next Steps slide. Error: ${e.message}`);
+    }
     logOutput.push("✅ Generation complete.");
     updateJobStatus(jobId, 'Finalizing presentation...');
 
+    // --- Clean up initial slides as requested ---
+    try {
+      const slides = activeDeck.getSlides();
+      if (slides.length >= 2) {
+        logOutput.push("Removing initial title and blank slides...");
+        slides[0].remove(); // Remove original title slide
+        slides[1].remove(); // Remove what was the second slide (e.g., blank or agenda)
+      }
+    } catch(e) {
+      logOutput.push(`Warning: Could not remove initial slides. Error: ${e.message}`);
+    }
     // --- Final Step: Create a status slide with the log output ---
     let statusSlide;
+    let finalStatusLog = "✅ Generation Status: SUCCESS";
+    
+    // --- Create Status Slide (with robust fallbacks) ---
     try {
+      // Attempt 1: Try to use the standard TITLE_AND_BODY layout.
       statusSlide = activeDeck.appendSlide(SlidesApp.PredefinedLayout.TITLE_AND_BODY);
     } catch (e) {
-      logOutput.push('Warning: Predefined layout "TITLE_AND_BODY" not found. Attempting fallback for status slide.');
-      let fallbackLayout;
-      if (activeDeck.getSlides().length > 0) {
-        fallbackLayout = activeDeck.getSlides()[0].getLayout();
-      } else {
-        fallbackLayout = SlidesApp.PredefinedLayout.BLANK;
+      Logger.log(`LAYOUT FALLBACK 1: Standard 'TITLE_AND_BODY' layout not found. Error: ${e.message}.`);
+      finalStatusLog = `⚠️ Generation SUCCESS (Layout Errors Encountered)`;
+      
+      try {
+        // Attempt 2: Find the first available layout in the presentation's master.
+        const layouts = activeDeck.getMasters()[0].getLayouts();
+        if (layouts.length > 0) {
+          statusSlide = activeDeck.appendSlide(layouts[0]);
+          Logger.log(`LAYOUT FALLBACK 2: Using the first available layout: '${layouts[0].getDisplayName() || 'Untitled Layout'}'`);
+        } else {
+          // If there are no layouts, this will throw, and we'll go to the final catch block.
+          throw new Error("No layouts found in the presentation master.");
+        }
+      } catch (e2) {
+        // Attempt 3 (Final Fallback): Insert a completely blank slide without a predefined layout.
+        // This is the most robust method but requires manually creating text boxes.
+        Logger.log(`LAYOUT FALLBACK 3: Could not use any existing layout. Error: ${e2.message}. Inserting a blank slide.`);
+        try {
+          statusSlide = activeDeck.insertSlide(activeDeck.getSlides().length);
+          const titleShape = statusSlide.insertShape(SlidesApp.ShapeType.TEXT_BOX, 50, 50, 622, 50);
+          titleShape.getText().setText(finalStatusLog);
+          titleShape.getText().getTextStyle().setBold(true).setFontSize(24);
+          const bodyShape = statusSlide.insertShape(SlidesApp.ShapeType.TEXT_BOX, 50, 110, 622, 400);
+          bodyShape.getText().setText(logOutput.join('\n'));
+        } catch (e3) {
+          Logger.log(`CRITICAL FINALIZATION ERROR: Failed to create status slide entirely. Error: ${e3.message}`);
+          updateJobStatus(jobId, `COMPLETED (Critical Error during final slide creation): ${e3.message}`);
+          return; // Return early, the script cannot complete the final action.
+        }
       }
-      statusSlide = activeDeck.appendSlide(fallbackLayout);
     }
 
-    const statusTitle = statusSlide.getPlaceholder(SlidesApp.PlaceholderType.TITLE);
-    if (statusTitle) {
-      statusTitle.getText().setText("Generation Status");
-    }
+    // --- Populate Status Slide (Only if a slide object was successfully created) ---
+    if (statusSlide && statusSlide.getPlaceholder) {
+      const statusTitle = statusSlide.getPlaceholder(SlidesApp.PlaceholderType.TITLE);
+      if (statusTitle) {
+        statusTitle.getText().setText(finalStatusLog);
+      }
 
-    const statusBody = statusSlide.getPlaceholder(SlidesApp.PlaceholderType.BODY);
-    if (statusBody) {
-      statusBody.getText().setText(logOutput.join('\n'));
-    } else if (statusTitle) {
-      statusTitle.getText().appendText(" (See Logs for Details)");
-      Logger.log("Status slide has no BODY placeholder. Full log:\n" + logOutput.join('\n'));
+      const statusBody = statusSlide.getPlaceholder(SlidesApp.PlaceholderType.BODY);
+      if (statusBody) {
+        statusBody.getText().setText(logOutput.join('\n'));
+      } else {
+        // If the slide was created but has no placeholders (e.g., from a custom layout),
+        // we don't want to error out. The manually created text boxes will suffice.
+        Logger.log("Status slide was created, but it has no standard 'TITLE' or 'BODY' placeholders to populate.");
+      }
     }
-
+    
   } catch (e) {
     Logger.log(`Error in generateSlides: ${e.toString()}\n${e.stack}`);
-    updateJobStatus(jobId, `ERROR: ${e.message}`);
+    
+    // If it's a permission error, create a more descriptive error to throw to the client.
+    if (e.message.includes("Action not allowed")) {
+       const userEmail = Session.getActiveUser().getEmail() || "your account";
+       const friendlyError = new Error(`Permission Denied. Please ensure the account '${userEmail}' has EDIT access to this presentation and at least VIEWER access to the source folder and its files.`);
+       updateJobStatus(jobId, `ERROR: ${friendlyError.message}`);
+       throw friendlyError; // Throw the new, more descriptive error.
+    } else {
+       // For all other errors, update status with the original message.
+       updateJobStatus(jobId, `ERROR: ${e.message}`);
+    }
     
     let errorSlide;
     try {
-        // Try the robust TITLE_AND_BODY for the error slide
+        // Try to create an error slide using the most robust method (TITLE_AND_BODY fallback)
         errorSlide = activeDeck.appendSlide(SlidesApp.PredefinedLayout.TITLE_AND_BODY);
         errorSlide.getPlaceholder(SlidesApp.PlaceholderType.TITLE).getText().setText(`❌ Generation Failed`);
         errorSlide.getPlaceholder(SlidesApp.PlaceholderType.BODY).getText().setText(`Error Message: ${e.message}\n\nCheck the Apps Script Logs for full details.`);
     } catch (layoutError) {
-        Logger.log(`Could not use TITLE_AND_BODY for error slide: ${layoutError.message}. Attempting fallback.`);
-        let fallbackLayout;
-        if (activeDeck.getSlides().length > 0) {
-          fallbackLayout = activeDeck.getSlides()[0].getLayout();
-        } else {
-          fallbackLayout = SlidesApp.PredefinedLayout.BLANK;
-        }
-        errorSlide = activeDeck.appendSlide(fallbackLayout);
-        const errorTitle = errorSlide.getPlaceholder(SlidesApp.PlaceholderType.TITLE);
-        if (errorTitle) errorTitle.getText().setText(`❌ Generation Failed`);
-        const errorBody = errorSlide.getPlaceholder(SlidesApp.PlaceholderType.BODY);
-        if (errorBody) errorBody.getText().setText(`Error Message: ${e.message}\n\nCheck the Apps Script Logs for full details.`);
-        Logger.log(`Fallback layout used for error slide: ${layoutError.message}`);
+        // If even the error slide fails, log it and move on.
+        Logger.log(`Could not create error slide. Error: ${layoutError.message}`);
     }
 
     // IMPORTANT: Re-throw the error so that the client-side .withFailureHandler()
