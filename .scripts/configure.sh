@@ -7,11 +7,21 @@ git config --global user.name "Alex Burdenko"
 SCRIPT_DIR_CONFIGURE="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 # Try to get project from gcloud config, otherwise prompt the user.
 
+# --- Load .env file if it exists ---
+# This allows the .env file to be the primary source of configuration.
+if [ -f ".env" ]; then
+  echo "Loading environment variables from .env file..."
+  # The `set -a` command automatically exports all variables that are subsequently defined.
+  set -a
+  source .env
+  set +a
+fi
+
 # Determine PROJECT_ID and Google Credentials Setup
-PROJECT_ID=""
 SERVICE_ACCOUNT_KEY_FILE="$SCRIPT_DIR_CONFIGURE/../../service_account.json"
 
 # 1. Prioritize service account key file if it exists
+# This logic is now secondary to the .env file.
 if [ -f "$SERVICE_ACCOUNT_KEY_FILE" ]; then
   echo "Service account key found. Using its project ID for configuration."
   export GOOGLE_APPLICATION_CREDENTIALS="$SERVICE_ACCOUNT_KEY_FILE"
@@ -432,26 +442,22 @@ if command -v clasp &> /dev/null && clasp login --status &>/dev/null; then
     # 2. Inject the GCP Project ID
     sed -i "s|__GCP_PROJECT_ID_PLACEHOLDER__|${PROJECT_ID}|g" "$SIDEBAR_HTML_FILE"
 
-    GEMINI_API_KEY=""
-    
-    # 3. Inject the default Gemini API Key by replacing the placeholder in the 'value' attribute.
-    sed -i "s|__GEMINI_API_KEY_PLACEHOLDER__|${GEMINI_API_KEY}|g" "$SIDEBAR_HTML_FILE"
+    # 3. Inject the Gemini API Key. Use the environment variable if it exists, otherwise use an empty string.
+    sed -i "s|__GEMINI_API_KEY_PLACEHOLDER__|${GEMINI_API_KEY:-}|g" "$SIDEBAR_HTML_FILE"
 
     # 4. Inject the current datetime stamp in Eastern Time for version tracking.
     DATETIME_STAMP=$(TZ="America/New_York" date +"%Y-%m-%d %H:%M %Z")
     sed -i "s|__DATETIME_PLACEHOLDER__|${DATETIME_STAMP}|g" "$SIDEBAR_HTML_FILE"
   fi
 
-  # *** REMINDER: YOU MUST EDIT THIS VALUE ***
-  # Get this ID from your Apps Script project's "Project Settings" page.
-  APP_SCRIPT_ID="1GFB9Skd187aZX1XRI1yLcJ8aCWGb2eCj57C5As1lhfzpnR_3fr5oearE"
-  
-  # Add a check to ensure the user has replaced the placeholder ID.
-  if [[ "$APP_SCRIPT_ID" == "!!!-REPLACE-ME-WITH-YOUR-SCRIPT-ID-FROM-PROJECT-SETTINGS-!!!" ]]; then
+  # Check that APP_SCRIPT_ID is set (it should be loaded from the .env file).
+  # If it's not set, we can't proceed with clasp.
+  if [ -z "$APP_SCRIPT_ID" ]; then
     echo "-------------------------------------------------------------------" >&2
-    echo "ACTION REQUIRED: You must edit the '.scripts/configure.sh' file." >&2
-    echo "Replace the placeholder value for 'APP_SCRIPT_ID' with the actual" >&2
-    echo "Script ID from your Google Apps Script project's settings page." >&2
+    echo "ACTION REQUIRED: The 'APP_SCRIPT_ID' is not set." >&2
+    echo "Please add the following line to your '.env' file:" >&2
+    echo "" >&2
+    echo "APP_SCRIPT_ID=\"YOUR_APPS_SCRIPT_ID_HERE\"" >&2
     echo "-------------------------------------------------------------------" >&2
     return 1 # Stop sourcing the script
   fi

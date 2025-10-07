@@ -551,13 +551,15 @@ Example: {"title": "Agenda", "points": ["Introduction", "Problem Statement", "Pr
 
           try {
             // Attempt to copy the slide using NOT_LINKED mode, which is more robust against theme/layout mismatches.
+            const sourceSlideNumber = slideToCopy.getSlideIndex() + 1; // Get the 1-based index
             const appendedSlide = activeDeck.appendSlide(slideToCopy, SlidesApp.SlideLinkingMode.NOT_LINKED);
             // Now, get the fully-hydrated slide object using its ID. This is the most reliable method.
             newSlide = activeDeck.getSlideById(appendedSlide.getObjectId());
 
-            logMsg = `  - Copied slide from '${sourceDeck.getName()}' (NOT_LINKED)`;
+            logMsg = `  - Copied slide #${sourceSlideNumber} from '${sourceDeck.getName()}' (NOT_LINKED)`;
           } catch (copyError) {
-            logMsg = `  - SKIPPED SLIDE: Copy failed due to layout incompatibility. Error: ${copyError.message}`;
+            const sourceSlideNumber = slideToCopy.getSlideIndex() + 1;
+            logMsg = `  - SKIPPED SLIDE #${sourceSlideNumber}: Copy failed due to layout incompatibility. Error: ${copyError.message}`;
             logOutput.push(logMsg);
             Logger.log(`CRITICAL: Failed to copy slide ${slideInfo.slideId} from ${sourceDeck.getName()}. Error: ${copyError.message}`);
             continue; // Skip to the next slide in the loop
@@ -667,10 +669,10 @@ Example: {"title": "Next Steps", "points": ["Schedule follow-up meeting", "Provi
           nextStepsSlide = activeDeck.appendSlide(fallbackLayout);
         }
 
-        const titlePlaceholder = nextStepsSlide.getPlaceholder(SlidesApp.PlaceholderType.TITLE);
+        const titlePlaceholder = nextStepsSlide.getPlaceholder(SlidesApp.PlaceholderType.TITLE)?.asShape();
         if (titlePlaceholder) titlePlaceholder.getText().setText(nextStepsData.title);
 
-        const bodyPlaceholder = nextStepsSlide.getPlaceholder(SlidesApp.PlaceholderType.BODY);
+        const bodyPlaceholder = nextStepsSlide.getPlaceholder(SlidesApp.PlaceholderType.BODY)?.asShape();
         if (bodyPlaceholder) nextStepsData.points.forEach(point => bodyPlaceholder.getText().appendListItem(point));
         logOutput.push('Generated and inserted Next Steps slide.');
       }
@@ -680,6 +682,7 @@ Example: {"title": "Next Steps", "points": ["Schedule follow-up meeting", "Provi
     logOutput.push("✅ Generation complete.");
     updateJobStatus(jobId, 'Finalizing presentation...');
 
+    
     // --- Clean up initial slides as requested ---
     try {
       const slides = activeDeck.getSlides();
@@ -734,12 +737,12 @@ Example: {"title": "Next Steps", "points": ["Schedule follow-up meeting", "Provi
 
     // --- Populate Status Slide (Only if a slide object was successfully created) ---
     if (statusSlide && statusSlide.getPlaceholder) {
-      const statusTitle = statusSlide.getPlaceholder(SlidesApp.PlaceholderType.TITLE);
+      const statusTitle = statusSlide.getPlaceholder(SlidesApp.PlaceholderType.TITLE)?.asShape();
       if (statusTitle) {
         statusTitle.getText().setText(finalStatusLog);
       }
 
-      const statusBody = statusSlide.getPlaceholder(SlidesApp.PlaceholderType.BODY);
+      const statusBody = statusSlide.getPlaceholder(SlidesApp.PlaceholderType.BODY)?.asShape();
       if (statusBody) {
         statusBody.getText().setText(logOutput.join('\n'));
       } else {
@@ -749,6 +752,9 @@ Example: {"title": "Next Steps", "points": ["Schedule follow-up meeting", "Provi
       }
     }
     
+    // Send the final status update before the function returns successfully.
+    updateJobStatus(jobId, 'Generation Completed');
+
   } catch (e) {
     Logger.log(`Error in generateSlides: ${e.toString()}\n${e.stack}`);
     
