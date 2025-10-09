@@ -551,15 +551,13 @@ Example: {"title": "Agenda", "points": ["Introduction", "Problem Statement", "Pr
 
           try {
             // Attempt to copy the slide using NOT_LINKED mode, which is more robust against theme/layout mismatches.
-            const sourceSlideNumber = slideToCopy.getSlideIndex() + 1; // Get the 1-based index
             const appendedSlide = activeDeck.appendSlide(slideToCopy, SlidesApp.SlideLinkingMode.NOT_LINKED);
             // Now, get the fully-hydrated slide object using its ID. This is the most reliable method.
             newSlide = activeDeck.getSlideById(appendedSlide.getObjectId());
 
-            logMsg = `  - Copied slide #${sourceSlideNumber} from '${sourceDeck.getName()}' (NOT_LINKED)`;
+            logMsg = `  - Copied slide from '${sourceDeck.getName()}' (NOT_LINKED)`;
           } catch (copyError) {
-            const sourceSlideNumber = slideToCopy.getSlideIndex() + 1;
-            logMsg = `  - SKIPPED SLIDE #${sourceSlideNumber}: Copy failed due to layout incompatibility. Error: ${copyError.message}`;
+            logMsg = `  - SKIPPED SLIDE: Copy failed due to layout incompatibility. Error: ${copyError.message}`;
             logOutput.push(logMsg);
             Logger.log(`CRITICAL: Failed to copy slide ${slideInfo.slideId} from ${sourceDeck.getName()}. Error: ${copyError.message}`);
             continue; // Skip to the next slide in the loop
