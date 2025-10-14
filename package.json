@@ -1,5 +1,5 @@
 {
-  "name": "slide-generator-js",
+  "name": "Email Archiver",
   "version": "1.0.0",
   "description": "Google Slides generator with Apps Script frontend.",
   "scripts": {
