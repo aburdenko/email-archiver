@@ -6,7 +6,7 @@
     {
       "label": "Push Apps Script Project",
       "type": "shell",
-      "command": ". .scripts/configure.sh && clasp push",
+      "command": "bash -c '. .scripts/configure.sh && clasp push'",
       "problemMatcher": [],
       "presentation": {
         "reveal": "always",
@@ -20,7 +20,7 @@
     {
       "label": "Watch Apps Script Files",
       "type": "shell",
-      "command": ". .scripts/configure.sh && clasp push --watch --force",
+      "command": "bash -c '. .scripts/configure.sh && clasp push --watch --force'",
       "isBackground": true,
       "problemMatcher": [],
       "presentation": {

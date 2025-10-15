@@ -450,10 +450,10 @@ if command -v clasp &> /dev/null && clasp login --status &>/dev/null; then
     # 3. Inject the Gemini API Key. Use the environment variable if it exists, otherwise use an empty string.
     sed -i "s|__GEMINI_API_KEY_PLACEHOLDER__|${GEMINI_API_KEY:-}|g" "$SIDEBAR_HTML_FILE"
 
-    # 4. Inject the current datetime stamp in Eastern Time for version tracking.
-    DATETIME_STAMP=$(TZ="America/New_York" date +"%Y-%m-%d %H:%M %Z")
-    sed -i "s|__DATETIME_PLACEHOLDER__|${DATETIME_STAMP}|g" "$SIDEBAR_HTML_FILE"
   fi
+
+  echo "Generating apps-script/last_update.html for version tracking..."
+  TZ="America/New_York" date +"%Y-%m-%d %H:%M %Z" > apps-script/last_update.html
 
   # Check that APP_SCRIPT_ID is set. If not, offer to create a new project.
   if [ -z "$APP_SCRIPT_ID" ]; then

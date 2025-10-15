@@ -49,6 +49,14 @@ function runArchiveForSpecificTabs(specificTabTitles) {
   // Reset the task cache at the beginning of each run
   _existingTaskTitlesCache = null;
 
+  // If this is a specific run, first clear the history for the selected tabs.
+  // This ensures a full reprocessing of all emails for those tabs.
+  if (specificTabTitles && Array.isArray(specificTabTitles) && specificTabTitles.length > 0) {
+    Logger.log(`Clearing history for specific tabs: ${specificTabTitles.join(', ')}`);
+    specificTabTitles.forEach(tabTitle => {
+      resetProcessedEmailIdsForTab(tabTitle);
+    });
+  }
   const isUiAvailable = canUseUi();
   const ui = isUiAvailable ? DocumentApp.getUi() : null;
   const doc = DocumentApp.getActiveDocument();
@@ -106,6 +114,7 @@ function runArchiveForSpecificTabs(specificTabTitles) {
     if (!matchedTab) return;
     if (threadInfo.needsAttention) tabsNeedingAttention.add(matchedTab.getTitle());
 
+    
     const tabTitle = matchedTab.getTitle();
     const normalizedTabTitle = tabTitle.toLowerCase();
     const processedIdsForThisTab = new Set(Object.keys(processedDataByTab[normalizedTabTitle] || {}));
@@ -113,7 +122,7 @@ function runArchiveForSpecificTabs(specificTabTitles) {
     if (!hasUnprocessed) return;
 
     const body = matchedTab.asDocumentTab().getBody();
-    const lastMessage = thread.getMessages()[thread.getMessages().length - 1];
+    const lastMessage = thread.getMessages()[thread.getMessages().length - 1]; // This is still useful for date sorting
     const insertionResult = insertEmailContent(body, lastMessage, threadInfo, APPEND_AT_TOP);
 
     if (insertionResult.success) {
@@ -139,9 +148,10 @@ function runArchiveForSpecificTabs(specificTabTitles) {
     if (tab) insertAttentionBanner(tab.asDocumentTab().getBody());
   });
 
+
   let summaryMessage = `Archiving Complete\nArchived ${newThreadsProcessedCount} new thread(s).`;
   if (modifiedTabs.size > 0) summaryMessage += `\n\nModified tabs:\n- ${Array.from(modifiedTabs).join("\n- ")}`;
-  if (tabsNeedingAttention.size > 0) summaryMessage += `\n\n${tabsNeedingAttention.size} tab(s) need attention.`;
+  if (tabsNeedingAttention.size > 0) summaryMessage += `\n\nTabs needing attention:\n- ${Array.from(tabsNeedingAttention).join("\n- ")}`;
   if (!tasksSucceeded) summaryMessage += `\n\nWARNING: Could not find or access Google Tasks list named '${GOOGLE_TASKS_LIST_NAME}'. No tasks were created.`;
 
   if (ui) ui.alert(summaryMessage);
@@ -182,21 +192,28 @@ function callGemini(prompt) {
 function insertEmailContent(body, message, threadInfo, addAtTop) {
   const threadId = threadInfo.thread.getId();
 
-  for (let i = body.getNumChildren() - 1; i >= 0; i--) {
+  // Search for and remove an existing entry for this thread ID *within this specific tab's body*.
+  for (let i = 0; i < body.getNumChildren(); i++) {
     const el = body.getChild(i);
     if (el.getType() === DocumentApp.ElementType.HORIZONTAL_RULE) {
       const attrs = el.getAttributes();
       if (attrs && attrs.thread_id === threadId) {
         Logger.log(`Found an existing entry for thread ID "${threadId}". Removing it before inserting the new version.`);
         let blockEndIndex = i + 1;
-        for (let j = i + 1; j < body.getNumChildren(); j++) {
-            const nextEl = body.getChild(j);
-            if(nextEl.getType() === DocumentApp.ElementType.HORIZONTAL_RULE && nextEl.getAttributes() && nextEl.getAttributes().script_entry_marker) {
-                blockEndIndex = j;
-                break;
-            }
-            if(j === body.getNumChildren() - 1) blockEndIndex = j + 1;
+        // Find the end of the block, which is the NEXT horizontal rule.
+        // If no next rule is found, it means this is the last entry in the doc,
+        // so we remove all elements until the end.
+        let nextRuleFound = false;
+        for (let j = i + 1; j < body.getNumChildren(); j++) { // Start searching from the element AFTER the current HR
+          const nextEl = body.getChild(j);
+          if (nextEl.getType() === DocumentApp.ElementType.HORIZONTAL_RULE && nextEl.getAttributes() && nextEl.getAttributes().script_entry_marker) {
+            blockEndIndex = j; // The end is the start of the next block
+            nextRuleFound = true;
+            break;
+          }
         }
+        if (!nextRuleFound) blockEndIndex = body.getNumChildren();
+
         for (let k = blockEndIndex - 1; k >= i; k--) {
           body.getChild(k).removeFromParent();
         }
@@ -208,7 +225,7 @@ function insertEmailContent(body, message, threadInfo, addAtTop) {
   let fullConversation="";
   threadInfo.thread.getMessages().forEach(msg=>{let cleanBody=msg.getPlainBody().replace(/^On.*wrote:[\r\n]*/gm,"").replace(/(^>.*$\n?)+/gm,"").trim();if(cleanBody)fullConversation+=`From: ${msg.getFrom()}\nDate: ${msg.getDate()}\n---\n${cleanBody}\n\n===\n\n`});
   
-  const emailBodyForPrompt=fullConversation||message.getPlainBody(),emailSubject=message.getSubject()||"No Subject",prompt=`Analyze the following email thread and provide a response in two parts.\n1.  **SUMMARY**: A concise, one-sentence summary of the email's conclusion or current status.\n2.  **TASKS**: A bullet point list of action items starting with a '*'. Each action item must be on its own single line. If there are no tasks, write "None".\n---EMAIL CONTENT---\nSubject: ${emailSubject}\n${emailBodyForPrompt}\n---END CONTENT---`,aiResponse=callGemini(prompt);
+  const emailBodyForPrompt=fullConversation||message.getPlainBody(),emailSubject=message.getSubject()||"No Subject",prompt=`Analyze the following email thread and provide a response in two parts.\n1.  **SUMMARY**: A concise, one-sentence summary of the email's conclusion or current status.\n2.  **TASKS**: A bullet point list of action items starting with a '*'. Each action item must be on its own single line. Crucially, if a task is for a specific person, start the line with their name (e.g., "Alex to follow up..."). If there are no tasks, write "None".\n---EMAIL CONTENT---\nSubject: ${emailSubject}\n${emailBodyForPrompt}\n---END CONTENT---`,aiResponse=callGemini(prompt);
   
   if(aiResponse.startsWith("Error:"))return Logger.log(`AI call failed for subject "${emailSubject}"`),{success:!1,tasksAttempted:!1};
   
@@ -232,13 +249,30 @@ function insertEmailContent(body, message, threadInfo, addAtTop) {
   hr.setAttributes({ 'script_entry_marker': true, 'thread_id': threadId }); 
 
   const headerParagraph=body.insertParagraph(insertionIndex++,headerText);
+  // Set the link first, as it can reset other paragraph formatting.
   headerParagraph.setLinkUrl(threadInfo.thread.getPermalink());
+  headerParagraph.setHeading(DocumentApp.ParagraphHeading.HEADING2); // Then set the heading.
   
-  body.insertParagraph(insertionIndex++,aiSummary);
+  // Insert the summary and then explicitly reset its attributes to prevent
+  // it from inheriting the link from the paragraph above.
+  const summaryParagraph = body.insertParagraph(insertionIndex++, aiSummary);
+  summaryParagraph.setLinkUrl(null); // Remove any inherited link
+  summaryParagraph.setAttributes({}); // Clear all other attributes like underline
   
   if(aiTasks.length>0){
       body.insertParagraph(insertionIndex++,"Action items").setBold(!0);
-      aiTasks.forEach(t=>{body.insertListItem(insertionIndex++,t).setGlyphType(DocumentApp.GlyphType.CHECKBOX)})
+      aiTasks.forEach(taskTitle => {
+        let displayTask = taskTitle;
+        // Check if the task is assigned to the user at the beginning of the string.
+        const isAssignedToUser = USER_TASK_ALIASES.some(alias => 
+            new RegExp(`^${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(taskTitle)
+        );
+        // If it is, ensure the primary alias is prepended for clarity in the doc.
+        if (isAssignedToUser) {
+            displayTask = `${USER_TASK_ALIASES[0]} to ${taskTitle.replace(new RegExp(`^(${USER_TASK_ALIASES.join('|')})\\s*(to\\s+)?`, 'i'), '').trim()}`;
+        }
+        body.insertListItem(insertionIndex++, displayTask).setGlyphType(DocumentApp.GlyphType.CHECKBOX);
+      });
   }
   
   return body.insertParagraph(insertionIndex,""),{success:!0,tasksAttempted:aiTasks.length>0,tasksSucceeded:tasksSucceeded}
@@ -283,7 +317,9 @@ function addTasksToWorkspace(tasks, emailSubject, threadLink) {
   tasks.forEach(taskTitle => {
     // --- DEFINITIVE FIX: Check if the task is assigned to the user ---
     const lowerCaseTask = taskTitle.toLowerCase();
-    const isAssignedToUser = USER_TASK_ALIASES.some(alias => lowerCaseTask.includes(alias.toLowerCase()));
+    // The task must START WITH the user's alias to be considered assigned.
+    const isAssignedToUser = USER_TASK_ALIASES.some(alias => 
+        new RegExp(`^${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(lowerCaseTask));
 
     if (!isAssignedToUser) {
         Logger.log(`Skipping task because it is not assigned to the user: "${taskTitle}"`);
@@ -292,11 +328,14 @@ function addTasksToWorkspace(tasks, emailSubject, threadLink) {
     // ---
 
     let cleanedTaskTitle = taskTitle;
+    // First, strip any existing alias from the beginning of the task.
     USER_TASK_ALIASES.forEach(alias => {
-      const aliasRegex = new RegExp(`^${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*(to\\s+)?`, 'i');
+      // This regex now handles "Alias to", "Alias:", or just "Alias" at the start.
+      const aliasRegex = new RegExp(`^${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*(to\\s*|:)?\\s*`, 'i');
       cleanedTaskTitle = cleanedTaskTitle.replace(aliasRegex, '').trim();
     });
 
+    // Use the cleaned title for duplicate checking and creation.
     const normalizedTitle = cleanedTaskTitle.toLowerCase().trim();
     
     if (existingTaskTitles.has(normalizedTitle)) {
