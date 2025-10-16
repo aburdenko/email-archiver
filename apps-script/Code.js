@@ -192,33 +192,29 @@ function callGemini(prompt) {
 function insertEmailContent(body, message, threadInfo, addAtTop) {
   const threadId = threadInfo.thread.getId();
 
-  // Search for and remove an existing entry for this thread ID *within this specific tab's body*.
-  for (let i = 0; i < body.getNumChildren(); i++) {
-    const el = body.getChild(i);
-    if (el.getType() === DocumentApp.ElementType.HORIZONTAL_RULE) {
-      const attrs = el.getAttributes();
-      if (attrs && attrs.thread_id === threadId) {
-        Logger.log(`Found an existing entry for thread ID "${threadId}". Removing it before inserting the new version.`);
-        let blockEndIndex = i + 1;
-        // Find the end of the block, which is the NEXT horizontal rule.
-        // If no next rule is found, it means this is the last entry in the doc,
-        // so we remove all elements until the end.
-        let nextRuleFound = false;
-        for (let j = i + 1; j < body.getNumChildren(); j++) { // Start searching from the element AFTER the current HR
-          const nextEl = body.getChild(j);
-          if (nextEl.getType() === DocumentApp.ElementType.HORIZONTAL_RULE && nextEl.getAttributes() && nextEl.getAttributes().script_entry_marker) {
-            blockEndIndex = j; // The end is the start of the next block
-            nextRuleFound = true;
-            break;
-          }
+  // --- FIX: Robust De-duplication ---
+  // Search for an existing entry for this thread ID and remove it.
+  // We search backwards to safely remove elements without affecting subsequent indices.
+  for (let i = body.getNumChildren() - 1; i >= 0; i--) {
+    const child = body.getChild(i);
+    // We identify our block by the Horizontal Rule with the thread_id attribute.
+    if (child.getType() === DocumentApp.ElementType.HORIZONTAL_RULE && child.getAttributes().thread_id === threadId) {
+      Logger.log(`Found an existing entry for thread ID "${threadId}". Removing it before inserting the new version.`);
+      
+      // Start removing elements from this HR marker onwards until we hit the next HR marker or the end of the document.
+      let currentIndex = i;
+      while (currentIndex < body.getNumChildren()) {
+        const currentChild = body.getChild(currentIndex);
+        // The next HR marker signifies the end of the block we want to remove.
+        // We check its attributes to ensure it's a script-generated marker and not the one we started with.
+        if (currentChild.getType() === DocumentApp.ElementType.HORIZONTAL_RULE && currentChild.getAttributes().script_entry_marker && currentIndex > i) {
+          break; // Stop before removing the next entry.
         }
-        if (!nextRuleFound) blockEndIndex = body.getNumChildren();
-
-        for (let k = blockEndIndex - 1; k >= i; k--) {
-          body.getChild(k).removeFromParent();
-        }
-        break; 
+        // Remove the element and keep checking at the same index, as the list shifts.
+        currentChild.removeFromParent();
       }
+      // Once the block is removed, we can stop searching.
+      break;
     }
   }
 
